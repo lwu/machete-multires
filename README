@@ -1,0 +1,310 @@
+
+Machete 3D: Multiresolution Mesh Editing and Signal Processing
+
+Leslie Wu
+Wen Su
+Zheng Sun
+Jingyi Jin
+
+Overview
+--------
+
+Machete 3D is a multiresolution mesh editor and signal processing
+application. It implements the ideas contained in <i>Multiresolution
+Signal Processing for Meshes</i>, by Guskov, Sweldens, and Schr\"oder.
+
+After building a progressive mesh, Machete computes a set of detail
+vectors for every vertex split. Both the new vertex and its 1-ring
+neighborhood are relaxed according to Guskov's relaxation
+operator. Then, the difference between the progressive mesh and the
+relaxed vertices is stored w.r.t. a local frame.
+
+With these detail vectors, we can perform multiresolution editing and
+signal processing by selectively rebuilding and attentuating the
+appropriate detail vectors.
+
+
+Programming framework
+---------------------
+
+We use the OpenMesh library (version 0-11-1, www.openmesh.org) as our
+half-edge data structure. We also use its preliminary decimation and
+progressive mesh framework. We found OpenMesh to be quite robust and
+reliable, but the decimation framework is not as mature, and is
+changing more rapidly. (We sent in a compile fix for VC7, for
+example. We also found a reproduceable freeze bug in VS.NET.)
+
+For the UI, we use the FOX toolkit (version 1.1.21,
+www.fox-toolkit.org), which is written in C++ and compiles for many
+platforms. It is as usable as FLTK, but not as ugly (in one author's
+opinion).
+
+We used CVS for source control and did pair programming to develop the
+core mesh processing framework. Both were useful in developing the
+project.
+
+Finally, we had a simple quasi-unit test framework, which was useful
+in verifying our assumptions. Although not automated, the set of test
+functions was a useful sanity check, and exposed several defects.
+
+
+Preprocessing
+-------------
+
+[Progressive Meshes]
+
+The OpenMesh triangle mesh directly supports vertex split and half-edge
+collapse as atomic operations, which allows for a progressive mesh
+representation. This is fully implemented in the OpenMeshTools
+library.
+
+[Mesh Simplification]
+
+By default, OpenMesh's decimation framework uses the Garland-Heckbert
+quadric error metric. Guskov et al. recommend that you weight the edge
+priorities using edge lengths as well, favoring the removal of long
+edges. We modified the simplification code to take this into account,
+we believe, but are not sure how this has affected the quality of our
+results.
+
+[Detail vector computation]
+
+We begin with the coarsest mesh and compute the detail vectors per
+vertex split. It is also possible to begin with the finest level and
+subdivide. The computations are equivalent. We store these vectors on
+the new vertex, after projecing onto a local frame.
+
+We compute the relaxation operator and edge weights as Guskov et
+al. describe them. We believe that our computations are accurate,
+because our smoothing results seem to visually match the paper's
+results.  The relaxed position of a vertex is based on the points from
+the coarser level as well as the weights computed from the finer level
+of the original progressive mesh. Note that these weights do not
+change as the mesh is being edited.
+
+These weights (w_ij in the paper), are a function of the coefficients
+computed in formula (1) of Guskov et al., which are functions of the
+areas and lengths of the progressive mesh. We describe how we compute
+these areas in a later section.
+
+[Weight and coefficent caching]
+
+To speed up processing, we cache these edge weights to avoid
+re-computation. We maintain a hash table of previously computed edge
+weights, but we throw out this hash table after every vertex split. We
+also maintain a hash table for coefficient computation, resulting in a
+multilevel caching hierarchy.
+
+In practice, caching these weights nearly halves the time required to
+compute detail vectors. VC7's implementation of std::hash_map was
+slightly faster than std::map for this application.
+
+Note that in our implementation, detail vector computation is much
+more expensive than decimation. For a 4k face model, decimation takes
+0.4s while detail vector computation takes 12.5s, on a Pentium II.
+
+Furthermore, we cache the set of weights computed per vertex split. As
+Guskov et al. notes, this takes storage linear in the degree of the
+mesh. Computing the weights only once per model makes filtering and mesh
+rebuilding take milliseconds instead of seconds.
+
+[Relaxation operator]
+
+We found that Guskov's relaxation operator works well for
+2-manifolds. He does not claim that his method works in general, but
+in practice the relaxation operator works well, even though we do not
+check for topological changes. However, 2-manifolds with boundaries do
+not seem to be relaxed as well.
+
+Although in theory the relaxation operator computations are easy to
+implement, it is extremely easy to get things wrong. The relaxed
+position of a point is a sum over a number of weights and a number of
+other points. Not only are there usually ~8-10 neighbors/weights
+involved, but each of these weights is itself a sum of coefficients
+over ~15-20 edges. Each of those coefficients is a linear function of
+the lengths and areas of a triangle.
+
+A subdivision stencil involves a similar neighborhood, but has
+constant weights which, in general, sum to unity. In comparison, the
+relaxation operator has weights which do not sum to unity, in general,
+and which are non-trivial linear functions of lengths and
+areas. (Computing a single weight by hand takes several minutes. There
+are ~8-10 weights per vertex, and there are usually 4-6 vertices
+updated per vertex split.)
+
+[Hinge map computation]
+
+The hinge map is critical to Guskov's relaxation operator. His
+pictures show better smoothing results than Laplacian smoothing for
+surface relaxation, because vertices do not move around as much. This
+minimizes the length of the detail vectors.
+
+In the end, the hinge map is a function of two adjacent triangles in
+R^3 (for our purposes). Conceptually, the areas involved should be
+computed by rotating one triangle so that both triangles are
+coplanar. However, we note that rotation is not programmatically
+necessary, and derive an alternative means of computation.
+
+Consider Figure 3 in Guskov et al., where <j,k,L1> and <j,k,L2> form
+two adjacent triangles.  The four areas that are computed per hinge
+map are the two triangle areas (easy to compute using cross-products)
+and the two triangles formed by <j,L1,L2> and <k,L1,L2> when the
+triangles are coplanar.
+
+            L1
+           _o-__
+         _/     '--_
+       _/           '--__
+     _/                  '--_
+  j o----------*---------------o k
+     `--                    __/
+        `--_              _/
+            `--        __/
+               `--_   / 
+                   `-o
+                    L2
+
+(ASCII text rendering aided by GNU Emacs 21 artist-mode)
+
+We wish to compute Area(<j,L1,L2>) and Area(<k,L1,L2>), without the
+coplanarity assumption.
+
+            L1
+            o
+            |\
+            | \
+            |  \    proj_L2
+  j o-------+--*----+----------o k
+      proj_L1   \   |
+                 \  |
+                  \ |
+                   \|
+                    o 
+                    L2
+
+    * = intersectionPt
+
+We project L1 and L2 to the line j<->k, resulting in proj_L1 and
+proj_L2. This gives us two similar triangles, <L1, proj_L1,
+intersectionPt> and <L2, proj_L2, intersectionPt>, where
+intersectionPt is the point where the lines j<->k and L1<->L2
+intersect, assuming that we have rotated the triangles to be coplanar.
+
+But, we do not actually need to rotate. We know length(L1, proj_L1)
+and length(L2, proj_L2) as well as length(proj_L1, proj_L2). Simple
+algebraic ratios formed by the similar triangles give us
+intersectionT, which gives us intersectionPt.
+
+Note that if the adjacent triangles do not form a convex polygon, the
+intersectionPt might lie outside the line segment j<->k. While the
+paper does not seem to clarify this point, we note that clipping
+intersectionT to [0,1], that is, making sure the intersectionPt does
+lie within the line segment j<->k, seems to ensure that the weights
+computed for a planar set of triangles surrounding a point adds up to
+unity.
+
+Given intersectionPt, Area(<j,L1,L2>) = Area(<j,L1,intersectionPt) +
+Area(<j,L2,intersectionPt>) and Area(<k,L1,L2>) =
+Area(<k,L1,intersectionPt) + Area(<k,L2,intersectionPt>).
+
+[Local frame]
+
+We compute a local frame per vertex split. For purposes of mesh
+smoothing and enhancement, it is vaguely acceptable that the local
+frame is the Identity matrix, because the mesh is not undergoing
+severe deformation. In practice, a local frame seems to be much more
+important for multiresolution editing.
+
+The local frame consists of an orthonormal local coordinate
+system. The up vector is computed by averaging the normals of nearby
+faces. If this sum has norm less than some epsilon, then we instead
+only use the normal from the first face. In the worst case, we just
+use the Identity frame.
+
+The left vector is computed by taking crossing up with the first
+outgoing edge, and forward vector is left cross up.
+
+To unproject, we multiply by the transpose of our local frame matrix
+M, because we know that transpose(M) = inverse(M) for all M
+orthonormal.
+
+Applications
+------------
+
+[Multiresolution Editing]
+
+The user can perform multiresolution editing as described in Guskov's
+paper. It is important to note that it would be a bit tricky to
+support real-time editing of coarse vertices when the fine vertices
+are still visible. Guskov's apparent approach, and our approach, is to
+allow the user to move to a coarse level before she does any
+editing. Then, she can click on "Reconstruct Details" to go back to
+the finest level.
+
+Supporting this real-time editing seems to be tricky because the
+detail vector computations are computed from the progressive mesh
+representation, which is a total ordering of vertices. Also, each
+vertex split affects more than a single vertex. However, it does seem
+plausible to be able to avoid restoring detail vectors for parts of
+the mesh that are not being edited.
+
+[Signal Processing]
+
+We allow the user to smooth and filter the mesh. By editing the
+frequency transfer function in the lower-right corner and applying the
+results, the user can attenuate or enhance certain frequencies.
+
+This transfer function is modeled using piecewise linear line
+segments. Right-click to add a joint, or to remove an existing joint.
+
+User Interface
+--------------
+
+[Vertex selection]
+
+The user can pick any vertex and move it around. We use OpenGL's
+pickbuffer feature. For dense meshes, it is often not enough to move
+just one vertex. Sometimes you want to move the neighboring vertices
+together as a cluster. This is why we have the vertex range selection.
+
+[Vertex range selection]
+
+This feature lets the user affect the N-ring neighborhood of the
+selected vertex. Increasing N selects more vertices. Once the selected
+vertex is moved, the N-ring neighborhood is also moved with the
+selected vertex. However, the amount a neighboring vertex is moved is
+inversely (linearly) proportional to the path length between it and
+the selected vertex.
+
+The selected vertex is in red. Its selected neighbors range from green
+to black. The darker a vertex, the less it will get affected by the
+movement of the red vertex.
+
+[Selective signal processing]
+
+The sphere limits the range of vertices in the mesh that are affected
+when we apply any kind of filter (such as when we smooth or
+enhance). The sphere selection and the vertex range work together to
+give the user better control over selection. Both of them are needed
+because one is based on the connectivity of the mesh, while the other
+is based on the geometry of the mesh.
+
+[Visualization]
+
+We draw detail vectors pertaining to the most recent vertex
+split. Note that these vectors are not unprojected from the local
+frame, which implies that they are accurate only in magnitude.
+
+
+Notes
+-----
+
+Blue cow "Build Hierarchy" icon modified from a cow image on Michael
+Garland's CMU web site.
+
+The "Reconstruct Details" icon is based on a picture of the Venus de
+Milo from the Louvre's website
+(http://www.louvre.fr/archives/antique/milo_ficheoeuvre_gauche.html).
+
+We use time.cxx from Michael Garland's libgfx library to implement
+cross-platform timing.
